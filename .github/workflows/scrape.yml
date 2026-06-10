@@ -36,20 +36,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-          cache-dependency-path: scraper/requirements.txt
-
       - name: Install dependencies
         run: |
-          pip install -r scraper/requirements.txt
-          pip install google-api-python-client
+          python3 -m pip install --user -r scraper/requirements.txt
+          python3 -m pip install --user google-api-python-client
 
       - name: Install Playwright browser
-        run: playwright install chromium --with-deps
+        run: python3 -m playwright install chromium
 
       - name: Determine tier from schedule
         id: tier_check
@@ -77,7 +70,7 @@ jobs:
           GDRIVE_CREDS_JSON: ${{ secrets.GDRIVE_CREDS_JSON }}
         run: |
           TODAY=$(date +%Y-%m-%d)
-          python -m scraper.fetch \
+          python3 -m scraper.fetch \
             --counties "${{ steps.tier_check.outputs.counties }}" \
             --days-back "${{ steps.tier_check.outputs.days_back }}" \
             --tier "${{ steps.tier_check.outputs.tier }}" \
@@ -92,12 +85,12 @@ jobs:
             exit 0
           fi
           TODAY=$(date +%Y-%m-%d)
-          python upload_drive.py "leads_${TODAY}.csv"
+          python3 upload_drive.py "leads_${TODAY}.csv"
 
       - name: Generate dashboard data (leads.json)
         run: |
           TODAY=$(date +%Y-%m-%d)
-          python - <<'EOF'
+          python3 - <<'EOF'
           import csv, json, pathlib, glob
 
           # Merge all CSVs from this run into leads.json for the dashboard
