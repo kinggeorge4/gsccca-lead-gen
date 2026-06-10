@@ -1,0 +1,22 @@
+
+# Sensitive — never commit
+cookies.json
+creds.json
+*.csv
+*_credentials.json
+service_account.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/

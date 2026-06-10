@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Propstor — GSCCCA Lead Dashboard</title>
+  <style>
+    :root {
+      --green: #16a34a;
+      --yellow: #ca8a04;
+      --bg: #0f172a;
+      --surface: #1e293b;
+      --border: #334155;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --accent: #3b82f6;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--text); font-family: system-ui, sans-serif; font-size: 14px; }
+    header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+    header h1 { font-size: 18px; font-weight: 700; letter-spacing: 0.02em; }
+    header h1 span { color: var(--accent); }
+    .stats { display: flex; gap: 24px; flex-wrap: wrap; }
+    .stat { text-align: center; }
+    .stat-value { font-size: 22px; font-weight: 700; color: var(--accent); }
+    .stat-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+    .filters { display: flex; gap: 12px; padding: 14px 24px; background: var(--surface); border-bottom: 1px solid var(--border); flex-wrap: wrap; align-items: flex-end; }
+    .filter-group { display: flex; flex-direction: column; gap: 4px; }
+    .filter-group label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+    select, input[type=text], input[type=date] { background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 6px 10px; border-radius: 6px; font-size: 13px; min-width: 140px; }
+    input[type=range] { width: 120px; accent-color: var(--accent); }
+    .slider-value { font-size: 12px; color: var(--accent); font-weight: 600; min-width: 28px; }
+    button { background: var(--accent); color: #fff; border: none; padding: 7px 14px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600; }
+    button:hover { opacity: 0.85; }
+    button.secondary { background: var(--surface); border: 1px solid var(--border); color: var(--text); }
+    .table-wrap { overflow-x: auto; padding: 0 24px 24px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 16px; }
+    th { background: var(--surface); color: var(--muted); text-transform: uppercase; font-size: 11px; letter-spacing: 0.05em; padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border); cursor: pointer; user-select: none; white-space: nowrap; }
+    th:hover { color: var(--text); }
+    th .sort-icon { margin-left: 4px; opacity: 0.4; }
+    th.sorted .sort-icon { opacity: 1; color: var(--accent); }
+    td { padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; white-space: nowrap; }
+    tr.score-high td { background: rgba(22, 163, 74, 0.08); }
+    tr.score-mid td { background: rgba(202, 138, 4, 0.08); }
+    .score-badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: 700; }
+    .score-badge.high { background: rgba(22,163,74,0.2); color: #4ade80; }
+    .score-badge.mid { background: rgba(202,138,4,0.2); color: #fbbf24; }
+    .score-badge.low { background: rgba(148,163,184,0.1); color: var(--muted); }
+    .tier-badge { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+    .tier-badge.t1 { background: rgba(239,68,68,0.15); color: #f87171; }
+    .tier-badge.t2 { background: rgba(59,130,246,0.15); color: #60a5fa; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .empty { text-align: center; padding: 48px; color: var(--muted); }
+    #dataStatus { font-size: 12px; color: var(--muted); padding: 8px 24px; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>Propstor <span>/ GSCCCA Leads</span></h1>
+  <div class="stats">
+    <div class="stat"><div class="stat-value" id="statTotal">—</div><div class="stat-label">Total Leads</div></div>
+    <div class="stat"><div class="stat-value" id="statAvgScore">—</div><div class="stat-label">Avg Score</div></div>
+    <div class="stat"><div class="stat-value" id="statTier1">—</div><div class="stat-label">Tier 1</div></div>
+    <div class="stat"><div class="stat-value" id="statTier2">—</div><div class="stat-label">Tier 2</div></div>
+    <div class="stat"><div class="stat-value" id="statTopCounty">—</div><div class="stat-label">Top County</div></div>
+  </div>
+</header>
+
+<div class="filters">
+  <div class="filter-group">
+    <label>County</label>
+    <select id="filterCounty"><option value="">All Counties</option></select>
+  </div>
+  <div class="filter-group">
+    <label>Instrument Type</label>
+    <select id="filterInstrument"><option value="">All Types</option></select>
+  </div>
+  <div class="filter-group">
+    <label>Date From</label>
+    <input type="date" id="filterDateFrom" />
+  </div>
+  <div class="filter-group">
+    <label>Date To</label>
+    <input type="date" id="filterDateTo" />
+  </div>
+  <div class="filter-group">
+    <label>Min Score: <span class="slider-value" id="scoreVal">50</span></label>
+    <input type="range" id="filterScore" min="0" max="100" value="50" />
+  </div>
+  <div class="filter-group">
+    <label>Tier</label>
+    <select id="filterTier">
+      <option value="">All</option>
+      <option value="1">Tier 1 Only</option>
+      <option value="2">Tier 2 Only</option>
+    </select>
+  </div>
+  <div class="filter-group" style="align-self:flex-end">
+    <button onclick="resetFilters()">Reset</button>
+  </div>
+  <div class="filter-group" style="align-self:flex-end">
+    <button class="secondary" onclick="exportCSV()">Export CSV</button>
+  </div>
+</div>
+
+<div id="dataStatus">Loading leads data…</div>
+
+<div class="table-wrap">
+  <table id="leadsTable">
+    <thead>
+      <tr>
+        <th data-col="lead_score">Score <span class="sort-icon">↕</span></th>
+        <th data-col="tier">Tier <span class="sort-icon">↕</span></th>
+        <th data-col="file_date">Filed <span class="sort-icon">↕</span></th>
+        <th data-col="county">County <span class="sort-icon">↕</span></th>
+        <th data-col="instrument_type">Instrument <span class="sort-icon">↕</span></th>
+        <th data-col="grantor_name">Grantor <span class="sort-icon">↕</span></th>
+        <th data-col="grantee_name">Grantee <span class="sort-icon">↕</span></th>
+        <th data-col="book_page">Book/Page <span class="sort-icon">↕</span></th>
+        <th data-col="consideration_amount">Consideration <span class="sort-icon">↕</span></th>
+        <th>Link</th>
+      </tr>
+    </thead>
+    <tbody id="leadsBody"></tbody>
+  </table>
+  <div class="empty" id="emptyMsg" style="display:none">No leads match the current filters.</div>
+</div>
+
+<script>
+// ── Data loading ──────────────────────────────────────────────────────────────
+let ALL_LEADS = [];
+let sortCol = 'lead_score';
+let sortAsc = false;
+
+// Try to load leads.json (generated by CI alongside the HTML)
+async function loadData() {
+  try {
+    const resp = await fetch('leads.json');
+    if (!resp.ok) throw new Error('No leads.json');
+    ALL_LEADS = await resp.json();
+    document.getElementById('dataStatus').textContent =
+      `Showing data from leads.json — ${ALL_LEADS.length} records loaded.`;
+  } catch {
+    // Fallback: try to parse leads from embedded JSON (CI can inject it)
+    if (window.LEADS_DATA) {
+      ALL_LEADS = window.LEADS_DATA;
+      document.getElementById('dataStatus').textContent =
+        `Embedded data — ${ALL_LEADS.length} records loaded.`;
+    } else {
+      document.getElementById('dataStatus').textContent =
+        'No data file found. Run the scraper and deploy leads.json alongside this page.';
+      ALL_LEADS = [];
+    }
+  }
+  populateFilters();
+  render();
+}
+
+// ── Filter population ─────────────────────────────────────────────────────────
+function populateFilters() {
+  const counties = [...new Set(ALL_LEADS.map(r => r.county))].sort();
+  const types = [...new Set(ALL_LEADS.map(r => r.instrument_type))].sort();
+
+  const cSel = document.getElementById('filterCounty');
+  counties.forEach(c => { const o = new Option(c, c); cSel.appendChild(o); });
+
+  const iSel = document.getElementById('filterInstrument');
+  types.forEach(t => { const o = new Option(t, t); iSel.appendChild(o); });
+}
+
+// ── Filtering ─────────────────────────────────────────────────────────────────
+function getFiltered() {
+  const county = document.getElementById('filterCounty').value;
+  const instrument = document.getElementById('filterInstrument').value;
+  const dateFrom = document.getElementById('filterDateFrom').value;
+  const dateTo = document.getElementById('filterDateTo').value;
+  const minScore = parseInt(document.getElementById('filterScore').value, 10);
+  const tier = document.getElementById('filterTier').value;
+
+  return ALL_LEADS.filter(r => {
+    if (county && r.county !== county) return false;
+    if (instrument && r.instrument_type !== instrument) return false;
+    if (tier && String(r.tier) !== tier) return false;
+    if ((r.lead_score || 0) < minScore) return false;
+    if (dateFrom || dateTo) {
+      const d = parseDate(r.file_date);
+      if (d) {
+        if (dateFrom && d < new Date(dateFrom)) return false;
+        if (dateTo && d > new Date(dateTo + 'T23:59:59')) return false;
+      }
+    }
+    return true;
+  });
+}
+
+function parseDate(str) {
+  if (!str) return null;
+  // handles MM/DD/YYYY and YYYY-MM-DD
+  const parts = str.includes('/') ? str.split('/') : null;
+  if (parts) return new Date(`${parts[2]}-${parts[0].padStart(2,'0')}-${parts[1].padStart(2,'0')}`);
+  return new Date(str);
+}
+
+// ── Sorting ───────────────────────────────────────────────────────────────────
+function sortData(rows) {
+  return [...rows].sort((a, b) => {
+    let va = a[sortCol] ?? '';
+    let vb = b[sortCol] ?? '';
+    if (sortCol === 'lead_score' || sortCol === 'tier') {
+      va = Number(va); vb = Number(vb);
+    } else if (sortCol === 'file_date') {
+      va = parseDate(va) || 0; vb = parseDate(vb) || 0;
+    }
+    if (va < vb) return sortAsc ? -1 : 1;
+    if (va > vb) return sortAsc ? 1 : -1;
+    return 0;
+  });
+}
+
+document.querySelectorAll('th[data-col]').forEach(th => {
+  th.addEventListener('click', () => {
+    const col = th.dataset.col;
+    if (sortCol === col) sortAsc = !sortAsc;
+    else { sortCol = col; sortAsc = false; }
+    document.querySelectorAll('th').forEach(t => t.classList.remove('sorted'));
+    th.classList.add('sorted');
+    th.querySelector('.sort-icon').textContent = sortAsc ? '↑' : '↓';
+    render();
+  });
+});
+
+// ── Rendering ─────────────────────────────────────────────────────────────────
+function render() {
+  const filtered = sortData(getFiltered());
+  const tbody = document.getElementById('leadsBody');
+  const empty = document.getElementById('emptyMsg');
+
+  updateStats(filtered);
+
+  if (filtered.length === 0) {
+    tbody.innerHTML = '';
+    empty.style.display = 'block';
+    return;
+  }
+  empty.style.display = 'none';
+
+  tbody.innerHTML = filtered.map(r => {
+    const score = r.lead_score || 0;
+    const rowClass = score >= 80 ? 'score-high' : score >= 50 ? 'score-mid' : '';
+    const badgeClass = score >= 80 ? 'high' : score >= 50 ? 'mid' : 'low';
+    const tierClass = r.tier == 1 ? 't1' : 't2';
+    return `<tr class="${rowClass}">
+      <td><span class="score-badge ${badgeClass}">${score}</span></td>
+      <td><span class="tier-badge ${tierClass}">T${r.tier}</span></td>
+      <td>${r.file_date || '—'}</td>
+      <td>${r.county || '—'}</td>
+      <td>${r.instrument_type || '—'}</td>
+      <td>${esc(r.grantor_name)}</td>
+      <td>${esc(r.grantee_name)}</td>
+      <td>${r.book_page || '—'}</td>
+      <td>${r.consideration_amount || '—'}</td>
+      <td>${r.source_url ? `<a href="${esc(r.source_url)}" target="_blank" rel="noopener">↗</a>` : '—'}</td>
+    </tr>`;
+  }).join('');
+}
+
+function esc(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function updateStats(rows) {
+  document.getElementById('statTotal').textContent = rows.length;
+  const avg = rows.length ? Math.round(rows.reduce((s, r) => s + (r.lead_score || 0), 0) / rows.length) : '—';
+  document.getElementById('statAvgScore').textContent = avg;
+  document.getElementById('statTier1').textContent = rows.filter(r => r.tier == 1).length;
+  document.getElementById('statTier2').textContent = rows.filter(r => r.tier == 2).length;
+
+  // Top county by count
+  const countyCounts = {};
+  rows.forEach(r => { countyCounts[r.county] = (countyCounts[r.county] || 0) + 1; });
+  const top = Object.entries(countyCounts).sort((a, b) => b[1] - a[1])[0];
+  document.getElementById('statTopCounty').textContent = top ? top[0] : '—';
+}
+
+// ── Controls ──────────────────────────────────────────────────────────────────
+document.getElementById('filterScore').addEventListener('input', function() {
+  document.getElementById('scoreVal').textContent = this.value;
+  render();
+});
+['filterCounty','filterInstrument','filterDateFrom','filterDateTo','filterTier'].forEach(id => {
+  document.getElementById(id).addEventListener('change', render);
+});
+
+function resetFilters() {
+  document.getElementById('filterCounty').value = '';
+  document.getElementById('filterInstrument').value = '';
+  document.getElementById('filterDateFrom').value = '';
+  document.getElementById('filterDateTo').value = '';
+  document.getElementById('filterScore').value = 50;
+  document.getElementById('scoreVal').textContent = '50';
+  document.getElementById('filterTier').value = '';
+  render();
+}
+
+// ── CSV export ────────────────────────────────────────────────────────────────
+function exportCSV() {
+  const rows = sortData(getFiltered());
+  if (!rows.length) { alert('No rows to export.'); return; }
+  const headers = ['lead_score','tier','file_date','county','instrument_type','grantor_name','grantee_name','book_page','consideration_amount','parcel_id','source_url','notes'];
+  const lines = [headers.join(',')];
+  rows.forEach(r => {
+    lines.push(headers.map(h => `"${String(r[h] || '').replace(/"/g, '""')}"`).join(','));
+  });
+  const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `propstor_leads_${new Date().toISOString().slice(0,10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+loadData();
+</script>
+</body>
+</html>

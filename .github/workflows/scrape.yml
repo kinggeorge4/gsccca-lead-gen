@@ -1,0 +1,137 @@
+name: GSCCCA Lead Scraper
+
+on:
+  schedule:
+    # Tier 1: daily at 7:00 AM EST (12:00 UTC)
+    - cron: '0 12 * * *'
+    # Tier 2: every Monday at 7:00 AM EST
+    - cron: '0 12 * * 1'
+  workflow_dispatch:
+    inputs:
+      counties:
+        description: 'Counties to scrape (ALL or comma-separated: FULTON,COBB)'
+        required: false
+        default: 'ALL'
+      days_back:
+        description: 'Days of filings to pull'
+        required: false
+        default: '3'
+      tier:
+        description: 'Which tier to scrape'
+        required: false
+        default: 'both'
+        type: choice
+        options:
+          - both
+          - '1'
+          - '2'
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: scraper/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          pip install -r scraper/requirements.txt
+          pip install google-api-python-client
+
+      - name: Determine tier from schedule
+        id: tier_check
+        run: |
+          # Monday schedule triggers both tier 1 (daily) + tier 2 runs.
+          # For manual dispatch, use the input. Otherwise detect day.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tier=${{ inputs.tier }}" >> $GITHUB_OUTPUT
+            echo "counties=${{ inputs.counties }}" >> $GITHUB_OUTPUT
+            echo "days_back=${{ inputs.days_back }}" >> $GITHUB_OUTPUT
+          else
+            DAY=$(date +%u)  # 1=Monday
+            if [ "$DAY" = "1" ]; then
+              echo "tier=both" >> $GITHUB_OUTPUT
+            else
+              echo "tier=1" >> $GITHUB_OUTPUT
+            fi
+            echo "counties=ALL" >> $GITHUB_OUTPUT
+            echo "days_back=3" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run scraper
+        env:
+          GSCCCA_COOKIES: ${{ secrets.GSCCCA_COOKIES }}
+          GDRIVE_CREDS_JSON: ${{ secrets.GDRIVE_CREDS_JSON }}
+        run: |
+          TODAY=$(date +%Y-%m-%d)
+          python -m scraper.fetch \
+            --counties "${{ steps.tier_check.outputs.counties }}" \
+            --days-back "${{ steps.tier_check.outputs.days_back }}" \
+            --tier "${{ steps.tier_check.outputs.tier }}" \
+            --output "leads_${TODAY}.csv"
+
+      - name: Upload to Google Drive
+        env:
+          GDRIVE_CREDS_JSON: ${{ secrets.GDRIVE_CREDS_JSON }}
+        run: |
+          TODAY=$(date +%Y-%m-%d)
+          python upload_drive.py "leads_${TODAY}.csv"
+
+      - name: Generate dashboard data (leads.json)
+        run: |
+          TODAY=$(date +%Y-%m-%d)
+          python - <<'EOF'
+          import csv, json, pathlib, glob
+
+          # Merge all CSVs from this run into leads.json for the dashboard
+          all_leads = []
+          for f in sorted(glob.glob("leads_*.csv"), reverse=True):
+              with open(f, newline="", encoding="utf-8") as fh:
+                  all_leads.extend(list(csv.DictReader(fh)))
+
+          # Convert numeric fields
+          for r in all_leads:
+              r["lead_score"] = int(r.get("lead_score") or 0)
+              r["tier"] = int(r.get("tier") or 0)
+
+          out = pathlib.Path("dashboard/leads.json")
+          out.write_text(json.dumps(all_leads, indent=2))
+          print(f"Wrote {len(all_leads)} leads to dashboard/leads.json")
+          EOF
+
+      - name: Archive CSV as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: leads-${{ github.run_id }}
+          path: leads_*.csv
+          retention-days: 30
+
+      - name: Deploy dashboard to gh-pages
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Stash the generated leads.json before branch switch
+          cp dashboard/leads.json /tmp/leads.json
+
+          git fetch origin gh-pages 2>/dev/null || true
+          git checkout gh-pages 2>/dev/null || git checkout --orphan gh-pages
+
+          # Restore dashboard files
+          git checkout ${{ github.sha }} -- dashboard/index.html 2>/dev/null || true
+          cp /tmp/leads.json leads.json
+          cp dashboard/index.html index.html 2>/dev/null || true
+
+          git add index.html leads.json
+          git diff --cached --quiet || git commit -m "Dashboard update $(date +%Y-%m-%d)"
+          git push origin gh-pages
