@@ -1,9 +1,11 @@
 """
-fetch.py — Core GSCCCA scraper.
+fetch.py — Core GSCCCA scraper (Playwright-based).
 
-Injects session cookies captured by get_gsccca_cookie.py (never logs in),
-then iterates instrument types × counties × date range, handling ASP.NET
-ViewState and pagination automatically.
+Raw HTTP POST silently fails — the server performs browser-specific checks
+during form submission. Playwright with injected session cookies works correctly.
+
+Cookie capture is done locally with get_gsccca_cookie.py (never in CI).
+This module NEVER attempts login; it only injects pre-captured cookies.
 """
 
 from __future__ import annotations
@@ -18,28 +20,18 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Generator
-from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 
-try:
-    import cloudscraper
-    _make_session = cloudscraper.create_scraper
-except ImportError:
-    import requests
-    _make_session = requests.Session
-
-import requests as _requests  # always available for type hints
-
-from .counties import GA_COUNTIES, resolve_counties
-from .instruments import ALL_INSTRUMENTS, TIER_1, TIER_2, get_tier, normalize_instrument
+from .counties import COUNTY_IDS, GA_COUNTIES, resolve_counties
+from .instruments import ALL_INSTRUMENTS, TIER_1, TIER_2, get_tier
 from .score import score_lead
 
 logger = logging.getLogger(__name__)
 
-BASE_RE_URL = "https://search.gsccca.org/RealEstate/InstrumentTypeSearch.aspx"
-BASE_LIEN_URL = "https://search.gsccca.org/Lien/namesearch.asp"
+BASE_RE_URL    = "https://search.gsccca.org/RealEstatePremium/InstrumentTypeSearch.aspx"
+RESULTS_RE_URL = "https://search.gsccca.org/RealEstatePremium/InstrumentTypeSearchResults.aspx"
 
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -48,6 +40,7 @@ USER_AGENT = (
 )
 
 COOKIE_MAX_AGE_HOURS = 12
+MAX_DATE_RANGE_DAYS  = 30  # GSCCCA client-side JS enforces ≤30-day ranges
 
 
 # ─── Cookie loading ────────────────────────────────────────────────────────────
@@ -67,11 +60,11 @@ def load_cookies(source: str | None = None) -> list[dict]:
             raw = cookie_file.read_text()
         else:
             raise FileNotFoundError(
-                "No cookies found. Run get_gsccca_cookie.py first, or set GSCCCA_COOKIES env var."
+                "No cookies found. Run get_gsccca_cookie.py first, "
+                "or set GSCCCA_COOKIES env var."
             )
 
-    # raw might be a file path string rather than JSON
-    if raw.strip().startswith("[") or raw.strip().startswith("{"):
+    if raw.strip().startswith(("[", "{")):
         cookies = json.loads(raw)
     else:
         cookies = json.loads(Path(raw).read_text())
@@ -95,225 +88,246 @@ def _check_cookie_age(cookies: list[dict]) -> None:
             )
 
 
-def _build_session(cookies: list[dict]):
-    session = _make_session()
-    session.headers.update({"User-Agent": USER_AGENT})
-    for c in cookies:
-        session.cookies.set(
-            c["name"],
-            c["value"],
-            domain=c.get("domain", ".gsccca.org"),
-        )
-    return session
+def _to_playwright_cookies(cookies: list[dict]) -> list[dict]:
+    """Convert scraper cookie dicts to Playwright add_cookies format (domain+path)."""
+    return [
+        {"name": c["name"], "value": c["value"], "domain": c["domain"], "path": "/"}
+        for c in cookies
+    ]
 
 
-# ─── ASP.NET ViewState helpers ──────────────────────────────────────────────
+# ─── HTML parsing ─────────────────────────────────────────────────────────────
 
-def _parse_viewstate(html: str) -> dict[str, str]:
+def _parse_dashboard_html(
+    html: str, county: str, instrument: str, source_url: str
+) -> tuple[list[dict], int]:
+    """
+    Parse one page of Dashboard-mode results.
+
+    Span ID patterns (N = record index, M = multi-value index):
+      BodyContent_lvDashboard_lblBook_N
+      BodyContent_lvDashboard_lblPage_N
+      BodyContent_lvDashboard_lblDateFiled_N
+      BodyContent_lvDashboard_lvExpandedGrantor_N_lblGrantorName_M
+      BodyContent_lvDashboard_lvExpandedGrantee_N_lblGranteeName_M
+      BodyContent_lvDashboard_lvCrossReference_N_lblXRefType_M  (PT-61 sale price)
+
+    Returns (records_on_this_page, total_record_count).
+    """
     soup = BeautifulSoup(html, "lxml")
-    fields = {}
-    for field in ("__VIEWSTATE", "__VIEWSTATEGENERATOR", "__EVENTVALIDATION"):
-        tag = soup.find("input", {"name": field})
-        if tag:
-            fields[field] = tag.get("value", "")
-    return fields
+
+    total = 0
+    found_span = soup.find("span", id="BodyContent_lvDashboard_lblDashboardNumberFound")
+    if found_span:
+        m = re.search(r"(\d[\d,]*)", found_span.get_text())
+        if m:
+            total = int(m.group(1).replace(",", ""))
+
+    if total == 0:
+        return [], 0
+
+    tier = get_tier(instrument)
+    records: list[dict] = []
+
+    for n in range(total):
+        book_span = soup.find("span", id=f"BodyContent_lvDashboard_lblBook_{n}")
+        if not book_span:
+            break
+
+        page_span = soup.find("span", id=f"BodyContent_lvDashboard_lblPage_{n}")
+        date_span = soup.find("span", id=f"BodyContent_lvDashboard_lblDateFiled_{n}")
+
+        book = book_span.get_text(strip=True)
+        page = page_span.get_text(strip=True) if page_span else ""
+        book_page = f"Book {book} Page {page}" if book and page else book
+        file_date = date_span.get_text(strip=True) if date_span else ""
+
+        grantors = _collect_names(
+            soup, f"BodyContent_lvDashboard_lvExpandedGrantor_{n}_lblGrantorName"
+        )
+        grantees = _collect_names(
+            soup, f"BodyContent_lvDashboard_lvExpandedGrantee_{n}_lblGranteeName"
+        )
+        consideration = _extract_pt61_price(soup, n)
+
+        grantor = "; ".join(grantors)
+        grantee = "; ".join(grantees)
+
+        if not grantor and not grantee:
+            continue
+
+        records.append({
+            "grantor_name":         grantor,
+            "grantee_name":         grantee,
+            "instrument_type":      instrument,
+            "book_page":            book_page,
+            "file_date":            file_date,
+            "county":               county,
+            "parcel_id":            "",
+            "consideration_amount": consideration,
+            "tier":                 tier or 0,
+            "scraped_at":           datetime.now(timezone.utc).isoformat(),
+            "source_url":           source_url,
+        })
+
+    return records, total
+
+
+def _collect_names(soup: BeautifulSoup, id_prefix: str) -> list[str]:
+    names = []
+    for m in range(30):
+        s = soup.find("span", id=f"{id_prefix}_{m}")
+        if not s:
+            break
+        name = s.get_text(strip=True)
+        if name:
+            names.append(name)
+    return names
+
+
+def _extract_pt61_price(soup: BeautifulSoup, record_idx: int) -> str:
+    """Extract sale price from PT-61 cross-reference entry, e.g. 'Sale Price: $275,000.00'."""
+    for m in range(20):
+        span = soup.find(
+            "span",
+            id=f"BodyContent_lvDashboard_lvCrossReference_{record_idx}_lblXRefType_{m}",
+        )
+        if not span:
+            break
+        text = span.get_text(strip=True)
+        price_match = re.search(r"Sale Price:\s*(\$[\d,]+(?:\.\d+)?)", text, re.I)
+        if price_match:
+            return price_match.group(1)
+    return ""
+
+
+def _parse_total_pages(html: str) -> int:
+    soup = BeautifulSoup(html, "lxml")
+    for span_id in (
+        "BodyContent_lvDashboard_lblDashboardCurrentPageTop",
+        "BodyContent_lvDashboard_lblDashboardCurrentPageBottom",
+    ):
+        s = soup.find("span", id=span_id)
+        if s:
+            m = re.search(r"Page\s+\d+\s+of\s+(\d+)", s.get_text(), re.I)
+            if m:
+                return int(m.group(1))
+    return 1
 
 
 def _check_session_expired(html: str) -> bool:
-    return "<title>" in html.lower() and "login" in html.lower()
+    lower = html.lower()
+    return (
+        "gsccca.org - login" in lower
+        or "txtpassword" in lower
+        or ("login" in lower and "txtuserid" in lower)
+    )
 
 
-# ─── Result parsing ─────────────────────────────────────────────────────────
+# ─── Search via Playwright ────────────────────────────────────────────────────
 
-_BOOK_PAGE_RE = re.compile(r"(\d+)\s*/\s*(\d+)")
-_AMOUNT_RE = re.compile(r"\$[\d,]+(?:\.\d{2})?|\bno consideration\b|\blove and affection\b", re.I)
+def search_instrument(
+    page,
+    county: str,
+    instrument_name: str,
+    instrument_id: str,
+    date_from: str,
+    date_to: str,
+) -> list[dict]:
+    """
+    Fetch all records for one county × instrument combination.
 
+    page is a live Playwright Page with session cookies already injected.
+    Returns a flat list of record dicts across all result pages.
+    """
+    county_id = COUNTY_IDS.get(county.upper())
+    if not county_id:
+        logger.warning("Unknown county: %s — skipping", county)
+        return []
 
-def _parse_results_page(html: str, county: str, instrument: str, source_url: str) -> list[dict]:
-    soup = BeautifulSoup(html, "lxml")
-    records = []
+    try:
+        page.goto(BASE_RE_URL, wait_until="domcontentloaded", timeout=20000)
+    except PlaywrightTimeout:
+        logger.warning("Timeout loading search form for %s / %s", county, instrument_name)
+        return []
 
-    # Results are in a table with id containing "GridView" or class "results"
-    table = soup.find("table", id=re.compile(r"Grid|grid|results", re.I))
-    if not table:
-        # Fallback: first table with more than 2 rows
-        tables = soup.find_all("table")
-        table = next((t for t in tables if len(t.find_all("tr")) > 2), None)
+    if _check_session_expired(page.content()):
+        raise RuntimeError("GSCCCA session expired — re-run get_gsccca_cookie.py")
 
-    if not table:
-        return records
+    page.select_option("select[name='ctl00$BodyContent$ddlCounties']",       value=county_id)
+    page.select_option("select[name='ctl00$BodyContent$ddlInstrumentTypes']", value=instrument_id)
+    page.fill("input[name='ctl00$BodyContent$txtDateFrom']",                  date_from)
+    page.fill("input[name='ctl00$BodyContent$txtDateTo']",                    date_to)
+    page.select_option("select[name='ctl00$BodyContent$ddlRecordsPerPage']",  value="100")
+    page.select_option("select[name='ctl00$BodyContent$ddlDisplayType']",     value="1")  # Dashboard
 
-    rows = table.find_all("tr")[1:]  # skip header
-    tier = get_tier(instrument)
+    page.click("input[value='Begin Search']")
+    try:
+        page.wait_for_load_state("networkidle", timeout=30000)
+    except PlaywrightTimeout:
+        page.wait_for_load_state("domcontentloaded", timeout=10000)
 
-    for row in rows:
-        cells = [td.get_text(strip=True) for td in row.find_all("td")]
-        if len(cells) < 3:
-            continue
+    if _check_session_expired(page.content()):
+        raise RuntimeError(
+            "GSCCCA session expired after search — re-run get_gsccca_cookie.py"
+        )
 
-        link_tag = row.find("a", href=True)
-        record_url = urljoin(source_url, link_tag["href"]) if link_tag else source_url
+    # Grantor/grantee data is loaded via AJAX when records are expanded.
+    # "Expand All Details" triggers a postback that populates the lvExpandedGrantor/Grantee spans.
+    expand_btn = page.query_selector("#BodyContent_lvDashboard_btnExpandAllDetails")
+    if expand_btn:
+        expand_btn.click()
+        try:
+            page.wait_for_load_state("networkidle", timeout=20000)
+        except PlaywrightTimeout:
+            page.wait_for_load_state("domcontentloaded", timeout=5000)
 
-        # Column positions vary slightly — parse by common patterns
-        record = _extract_fields(cells, county, instrument, tier, record_url)
-        if record:
-            records.append(record)
+    html = page.content()
+    url  = page.url
+
+    records, total = _parse_dashboard_html(html, county, instrument_name, url)
+
+    if total == 0:
+        logger.debug("No results: %s / %s %s–%s", county, instrument_name, date_from, date_to)
+        return []
+
+    total_pages = _parse_total_pages(html)
+    logger.info(
+        "Found %d records (%d page%s): %s / %s",
+        total, total_pages, "s" if total_pages > 1 else "",
+        county, instrument_name,
+    )
+
+    for page_num in range(2, total_pages + 1):
+        time.sleep(random.uniform(1, 2))
+        next_btn = page.query_selector("#BodyContent_lvDashboard_btnDashboardNextPageTop")
+        if not next_btn:
+            logger.warning(
+                "Next Page link missing at page %d for %s / %s",
+                page_num - 1, county, instrument_name,
+            )
+            break
+        next_btn.click()
+        try:
+            page.wait_for_load_state("networkidle", timeout=30000)
+        except PlaywrightTimeout:
+            page.wait_for_load_state("domcontentloaded", timeout=10000)
+
+        expand_btn = page.query_selector("#BodyContent_lvDashboard_btnExpandAllDetails")
+        if expand_btn:
+            expand_btn.click()
+            try:
+                page.wait_for_load_state("networkidle", timeout=20000)
+            except PlaywrightTimeout:
+                page.wait_for_load_state("domcontentloaded", timeout=5000)
+
+        page_records, _ = _parse_dashboard_html(page.content(), county, instrument_name, page.url)
+        records.extend(page_records)
 
     return records
 
 
-def _extract_fields(
-    cells: list[str],
-    county: str,
-    instrument: str,
-    tier: int | None,
-    source_url: str,
-) -> dict | None:
-    """
-    Map table cells to lead fields. GSCCCA returns columns approximately as:
-    [Book/Page, File Date, Grantor, Grantee, Instrument Type, Consideration, Parcel ID?]
-    Exact order varies by search type; we parse by content heuristic.
-    """
-    # Need at least grantor + grantee
-    if len(cells) < 3:
-        return None
-
-    # Attempt ordered mapping (most common GSCCCA layout)
-    def _maybe(idx: int) -> str:
-        return cells[idx].strip() if idx < len(cells) else ""
-
-    book_page = ""
-    file_date = ""
-    grantor = ""
-    grantee = ""
-    parcel_id = ""
-    consideration = ""
-
-    for i, cell in enumerate(cells):
-        if _BOOK_PAGE_RE.match(cell):
-            book_page = cell
-        elif re.match(r"\d{1,2}/\d{1,2}/\d{4}", cell):
-            file_date = cell
-        elif not grantor and len(cell) > 3 and i > 0:
-            grantor = cell
-        elif not grantee and len(cell) > 3 and i > 1 and cell != grantor:
-            grantee = cell
-        elif re.match(r"\d{2}-\d{3}-", cell) or re.match(r"[A-Z]\d{3}", cell):
-            parcel_id = cell
-        elif _AMOUNT_RE.search(cell):
-            consideration = cell
-
-    if not grantor and not grantee:
-        return None
-
-    return {
-        "grantor_name": grantor,
-        "grantee_name": grantee,
-        "instrument_type": normalize_instrument(instrument),
-        "book_page": book_page,
-        "file_date": file_date,
-        "county": county,
-        "parcel_id": parcel_id,
-        "consideration_amount": consideration,
-        "tier": tier or 0,
-        "scraped_at": datetime.now(timezone.utc).isoformat(),
-        "source_url": source_url,
-    }
-
-
-def _parse_total_records(html: str) -> int:
-    """Extract total record count from GSCCCA result header."""
-    soup = BeautifulSoup(html, "lxml")
-    # Look for "X records found" or "Showing 1-25 of X"
-    for text in soup.stripped_strings:
-        m = re.search(r"(\d+)\s+records?\s+found", text, re.I)
-        if m:
-            return int(m.group(1))
-        m = re.search(r"of\s+(\d+)", text, re.I)
-        if m:
-            return int(m.group(1))
-    return 0
-
-
-# ─── Main search function ───────────────────────────────────────────────────
-
-def search_instrument(
-    session,
-    county: str,
-    instrument: str,
-    date_from: str,
-    date_to: str,
-) -> Generator[dict, None, None]:
-    """
-    Yield all lead records for one county × instrument combination.
-    Handles multi-page results via ASP.NET postback pagination.
-    """
-    # Step 1: GET the search form to capture ViewState tokens
-    resp = session.get(BASE_RE_URL, timeout=30)
-    resp.raise_for_status()
-
-    if _check_session_expired(resp.text):
-        raise RuntimeError("GSCCCA session expired — re-run get_gsccca_cookie.py")
-
-    viewstate = _parse_viewstate(resp.text)
-
-    if not viewstate.get("__VIEWSTATE"):
-        logger.warning("No ViewState found for %s / %s — skipping", county, instrument)
-        return
-
-    # Step 2: POST the search
-    form_data = {
-        "__VIEWSTATE": viewstate.get("__VIEWSTATE", ""),
-        "__VIEWSTATEGENERATOR": viewstate.get("__VIEWSTATEGENERATOR", ""),
-        "__EVENTVALIDATION": viewstate.get("__EVENTVALIDATION", ""),
-        "__EVENTTARGET": "",
-        "__EVENTARGUMENT": "",
-        "ctl00$ContentPlaceHolder1$ddlCounty": county,
-        "ctl00$ContentPlaceHolder1$ddlInstrumentType": instrument,
-        "ctl00$ContentPlaceHolder1$txtFromDate": date_from,
-        "ctl00$ContentPlaceHolder1$txtToDate": date_to,
-        "ctl00$ContentPlaceHolder1$btnSearch": "Search",
-    }
-
-    time.sleep(random.uniform(2, 4))
-    resp = session.post(BASE_RE_URL, data=form_data, timeout=30)
-    resp.raise_for_status()
-
-    if _check_session_expired(resp.text):
-        raise RuntimeError("GSCCCA session expired after POST — re-run get_gsccca_cookie.py")
-
-    total = _parse_total_records(resp.text)
-    if total == 0:
-        # Distinguish no results from blocked
-        if "login" in resp.text.lower():
-            raise RuntimeError("Cookie expired — GSCCCA redirected to login")
-        logger.debug("No results: %s / %s %s–%s", county, instrument, date_from, date_to)
-        return
-
-    logger.info("Found %d records: %s / %s", total, county, instrument)
-
-    page_records = _parse_results_page(resp.text, county, instrument, BASE_RE_URL)
-    yield from page_records
-
-    # Paginate: 25 records per page
-    pages = (total + 24) // 25
-    for page_num in range(2, pages + 1):
-        time.sleep(random.uniform(1, 2))
-        vs = _parse_viewstate(resp.text)
-        page_data = {
-            "__VIEWSTATE": vs.get("__VIEWSTATE", ""),
-            "__VIEWSTATEGENERATOR": vs.get("__VIEWSTATEGENERATOR", ""),
-            "__EVENTVALIDATION": vs.get("__EVENTVALIDATION", ""),
-            "__EVENTTARGET": "ctl00$ContentPlaceHolder1$GridView1",
-            "__EVENTARGUMENT": f"Page${page_num}",
-        }
-        resp = session.post(BASE_RE_URL, data=page_data, timeout=30)
-        resp.raise_for_status()
-        page_records = _parse_results_page(resp.text, county, instrument, BASE_RE_URL)
-        yield from page_records
-
-
-# ─── Orchestration ───────────────────────────────────────────────────────────
+# ─── Orchestration ────────────────────────────────────────────────────────────
 
 def run_scrape(
     counties_spec: str = "ALL",
@@ -323,19 +337,19 @@ def run_scrape(
 ) -> list[dict]:
     """
     Full scrape run. Returns list of scored lead dicts sorted by lead_score desc.
-
-    Args:
-        counties_spec: "ALL" or comma-separated county names
-        days_back:     how many calendar days of filings to pull
-        tier:          1, 2, or "both"
-        cookie_source: JSON string, file path, or None (reads env/cookies.json)
     """
-    cookies = load_cookies(cookie_source)
-    session = _build_session(cookies)
+    if days_back > MAX_DATE_RANGE_DAYS:
+        logger.warning(
+            "days_back=%d exceeds GSCCCA max of %d — capping",
+            days_back, MAX_DATE_RANGE_DAYS,
+        )
+        days_back = MAX_DATE_RANGE_DAYS
 
-    counties = resolve_counties(counties_spec)
-    date_to = datetime.now().strftime("%m/%d/%Y")
-    date_from = (datetime.now() - timedelta(days=days_back)).strftime("%m/%d/%Y")
+    cookies    = load_cookies(cookie_source)
+    pw_cookies = _to_playwright_cookies(cookies)
+    counties   = resolve_counties(counties_spec)
+    date_to    = datetime.now().strftime("%m/%d/%Y")
+    date_from  = (datetime.now() - timedelta(days=days_back)).strftime("%m/%d/%Y")
 
     if tier == 1 or tier == "1":
         instruments = TIER_1
@@ -348,31 +362,51 @@ def run_scrape(
     total_combos = len(counties) * len(instruments)
     done = 0
 
-    for county in counties:
-        for instrument in instruments:
-            done += 1
-            logger.info("[%d/%d] %s — %s", done, total_combos, county, instrument)
-            try:
-                for lead in search_instrument(session, county, instrument, date_from, date_to):
-                    lead["lead_score"] = score_lead(lead)
-                    lead["notes"] = (
-                        f"{lead['instrument_type']} | Score: {lead['lead_score']} | "
-                        f"Filed: {lead['file_date']} | {lead['county']} County"
-                    )
-                    leads.append(lead)
-            except RuntimeError as exc:
-                logger.error("Session error: %s", exc)
-                raise
-            except Exception as exc:
-                logger.warning("Error scraping %s / %s: %s", county, instrument, exc)
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        context = browser.new_context(
+            user_agent=USER_AGENT,
+            viewport={"width": 1280, "height": 900},
+        )
+        context.add_cookies(pw_cookies)
+        scrape_page = context.new_page()
 
-            time.sleep(random.uniform(2, 4))  # between county iterations
+        try:
+            for county in counties:
+                for instrument_name, instrument_id in instruments.items():
+                    done += 1
+                    logger.info(
+                        "[%d/%d] %s — %s", done, total_combos, county, instrument_name
+                    )
+                    try:
+                        records = search_instrument(
+                            scrape_page,
+                            county, instrument_name, instrument_id,
+                            date_from, date_to,
+                        )
+                        for lead in records:
+                            lead["lead_score"] = score_lead(lead)
+                            lead["notes"] = (
+                                f"{lead['instrument_type']} | Score: {lead['lead_score']} | "
+                                f"Filed: {lead['file_date']} | {lead['county']} County"
+                            )
+                            leads.append(lead)
+                    except RuntimeError:
+                        raise
+                    except Exception as exc:
+                        logger.warning(
+                            "Error scraping %s / %s: %s", county, instrument_name, exc
+                        )
+
+                    time.sleep(random.uniform(2, 4))
+        finally:
+            browser.close()
 
     leads.sort(key=lambda r: r.get("lead_score", 0), reverse=True)
     return leads
 
 
-# ─── CSV export ──────────────────────────────────────────────────────────────
+# ─── CSV export ───────────────────────────────────────────────────────────────
 
 FIELDNAMES = [
     "grantor_name", "grantee_name", "instrument_type", "book_page",
@@ -391,7 +425,7 @@ def write_csv(leads: list[dict], output_path: Path) -> Path:
     return output_path
 
 
-# ─── CLI entry point ─────────────────────────────────────────────────────────
+# ─── CLI entry point ──────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     logging.basicConfig(
@@ -403,20 +437,19 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="GSCCCA lead scraper")
-    parser.add_argument("--counties", default="ALL", help="ALL or comma-separated county names")
+    parser.add_argument("--counties",  default="ALL")
     parser.add_argument("--days-back", type=int, default=3)
-    parser.add_argument("--tier", default="both", choices=["1", "2", "both"])
-    parser.add_argument("--output", default=None, help="Output CSV path (default: leads_YYYY-MM-DD.csv)")
+    parser.add_argument("--tier",      default="both", choices=["1", "2", "both"])
+    parser.add_argument("--output",    default=None)
     args = parser.parse_args()
 
     today = datetime.now().strftime("%Y-%m-%d")
-    out = Path(args.output) if args.output else Path(f"leads_{today}.csv")
+    out   = Path(args.output) if args.output else Path(f"leads_{today}.csv")
 
     leads = run_scrape(
         counties_spec=args.counties,
         days_back=args.days_back,
         tier=args.tier,
     )
-
     write_csv(leads, out)
     print(f"\nDone. {len(leads)} leads → {out}")

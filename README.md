@@ -7,7 +7,7 @@ Automated daily scraper for distressed property leads from the Georgia Superior 
 ## How It Works
 
 1. **Cookie capture (local)** — `get_gsccca_cookie.py` opens a real Chromium window, you log in manually, and it saves your session cookie to `cookies.json`.
-2. **Scraper (GitHub Actions)** — `scraper/fetch.py` injects that cookie into raw HTTP requests (bypassing Cloudflare), iterates all 159 counties × selected instrument types, and exports a dated CSV.
+2. **Scraper (GitHub Actions)** — `scraper/fetch.py` injects those cookies into a headless Playwright browser, navigates the Premium Instrument Type Search, expands all result records, and exports a dated CSV. Raw HTTP POST is not used — the GSCCCA server performs browser-specific validation that requires a real browser session.
 3. **Drive upload** — `upload_drive.py` pushes the CSV to `Propstor Leads / GSCCCA / YYYY-MM` in Google Drive and appends to `all_leads_master.csv`.
 4. **Dashboard** — GitHub Pages renders `dashboard/index.html` with filterable, sortable leads from `leads.json`.
 
@@ -19,7 +19,8 @@ Automated daily scraper for distressed property leads from the Georgia Superior 
 
 ```bash
 cd gsccca-lead-gen
-pip install playwright beautifulsoup4 requests cloudscraper lxml
+pip install -r scraper/requirements.txt
+pip install google-api-python-client
 playwright install chromium
 ```
 
@@ -29,9 +30,9 @@ playwright install chromium
 python get_gsccca_cookie.py
 ```
 
-- A Chromium window opens at `gsccca.org/Login.aspx`
-- Log in with your GSCCCA account
-- Press **ENTER** in the terminal once you see the search page
+- A Chromium window opens at `search.gsccca.org/RealEstatePremium/InstrumentTypeSearch.aspx` (auto-redirects to login)
+- Log in with your GSCCCA Premium account credentials
+- Press **ENTER** in the terminal once you see the Instrument Type Search page
 - `cookies.json` is written to the repo root (gitignored)
 
 ### 3. Add GitHub Secrets

@@ -48,6 +48,9 @@ jobs:
           pip install -r scraper/requirements.txt
           pip install google-api-python-client
 
+      - name: Install Playwright browser
+        run: playwright install chromium --with-deps
+
       - name: Determine tier from schedule
         id: tier_check
         run: |

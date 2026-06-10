@@ -24,20 +24,41 @@ except ImportError:
     print("ERROR: Playwright not installed. Run: pip install playwright && playwright install chromium")
     sys.exit(1)
 
-LOGIN_URL = "https://www.gsccca.org/Login.aspx"
-SEARCH_URL = "https://search.gsccca.org/RealEstate/InstrumentTypeSearch.aspx"
+# The search system (search.gsccca.org) uses a separate classic-ASP login at
+# /login.asp, distinct from www.gsccca.org. The Premium Instrument Type Search
+# lives at /RealEstatePremium/ and redirects unauthenticated users to login.asp.
+LOGIN_URL = "https://search.gsccca.org/RealEstatePremium/InstrumentTypeSearch.aspx"
+SEARCH_URL = "https://search.gsccca.org/RealEstatePremium/InstrumentTypeSearch.aspx"
 OUTPUT_FILE = Path(__file__).parent / "cookies.json"
+
+# Cookies we must have for the scraper to work
+REQUIRED_COOKIES = {"GUID", "ASPSESSIONID"}  # ASPSESSIONID prefix match
 
 BANNER = """
 ╔══════════════════════════════════════════════════════════════╗
 ║          GSCCCA Cookie Capture — Manual Login Required       ║
 ╠══════════════════════════════════════════════════════════════╣
-║  1. A Chromium window will open to the GSCCCA login page.   ║
-║  2. Log in with your GSCCCA account credentials.            ║
-║  3. Once the search page loads, return here and press ENTER. ║
-║  4. Your session cookies will be saved to cookies.json.     ║
+║  1. A Chromium window will open to the GSCCCA search login. ║
+║  2. Log in with your GSCCCA Premium account credentials.    ║
+║  3. Wait until the Instrument Type Search page fully loads. ║
+║  4. Return here and press ENTER.                            ║
+║  5. Your session cookies will be saved to cookies.json.     ║
 ╚══════════════════════════════════════════════════════════════╝
 """
+
+
+def _keep_cookie(c: dict) -> bool:
+    name = c["name"]
+    domain = c.get("domain", "")
+    if "gsccca" not in domain:
+        return False
+    # Always keep GUID (cross-domain auth token) and ASPSESSIONID (search session)
+    if name == "GUID" or name.startswith("ASPSESSIONID"):
+        return True
+    # Keep any other non-analytics cookies from gsccca domains
+    if name.startswith("_ga") or name.startswith("_gid"):
+        return False
+    return True
 
 
 def capture_cookies() -> list[dict]:
@@ -55,21 +76,23 @@ def capture_cookies() -> list[dict]:
 
         print(BANNER)
         print(f"Opening: {LOGIN_URL}")
-        page.goto(LOGIN_URL, wait_until="networkidle", timeout=30000)
+        # This will redirect to login.asp automatically if not authenticated
+        page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
 
-        input("\nPress ENTER after you have logged in and the search page is visible... ")
+        input(
+            "\nPress ENTER after you have logged in and the "
+            "Instrument Type Search page is fully visible... "
+        )
 
-        # Navigate to search domain so its cookie is set
-        try:
-            page.goto(SEARCH_URL, wait_until="networkidle", timeout=20000)
-        except PlaywrightTimeout:
-            print("Warning: search page timed out loading — cookies may still be valid.")
+        # Confirm we landed on the search page (not still on login)
+        current_url = page.url
+        if "login" in current_url.lower():
+            print("Warning: still on login page — did login complete?")
 
         all_cookies = context.cookies()
         browser.close()
 
-        # Keep only ASP.NET session cookies from both domains
-        session_cookies = [
+        kept = [
             {
                 "name": c["name"],
                 "value": c["value"],
@@ -78,24 +101,10 @@ def capture_cookies() -> list[dict]:
                 "captured_at": datetime.now(timezone.utc).isoformat(),
             }
             for c in all_cookies
-            if "ASP.NET_SessionId" in c["name"] or "ASPXAUTH" in c["name"]
+            if _keep_cookie(c)
         ]
 
-        if not session_cookies:
-            # Fallback: grab everything from gsccca domains
-            session_cookies = [
-                {
-                    "name": c["name"],
-                    "value": c["value"],
-                    "domain": c["domain"],
-                    "path": c["path"],
-                    "captured_at": datetime.now(timezone.utc).isoformat(),
-                }
-                for c in all_cookies
-                if "gsccca" in c["domain"]
-            ]
-
-        return session_cookies
+        return kept
 
 
 def main():
