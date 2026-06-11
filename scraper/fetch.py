@@ -28,6 +28,7 @@ from .counties import COUNTY_IDS, GA_COUNTIES, resolve_counties
 from .instruments import ALL_INSTRUMENTS, TIER_1, TIER_2, get_tier
 from .score import score_lead
 from .enrich import lookup_address
+from .deed_ocr import enrich_missing_addresses
 
 logger = logging.getLogger(__name__)
 
@@ -478,6 +479,16 @@ def run_scrape(
                         )
 
                     time.sleep(random.uniform(2, 4))
+
+            # OCR second pass: fill addresses for counties without GIS coverage
+            try:
+                ocr_page = context.new_page()
+                _county_ids_int = {k: int(v) for k, v in COUNTY_IDS.items()}
+                enrich_missing_addresses(ocr_page, leads, _county_ids_int)
+                ocr_page.close()
+            except Exception as exc:
+                logger.warning("OCR enrichment pass failed: %s", exc)
+
         finally:
             browser.close()
 
