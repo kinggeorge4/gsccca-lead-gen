@@ -331,25 +331,35 @@ def search_instrument(
 
 def run_scrape(
     counties_spec: str = "ALL",
-    days_back: int = 3,
+    days_back: int = 7,
     tier: int | str = "both",
     cookie_source: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
 ) -> list[dict]:
     """
     Full scrape run. Returns list of scored lead dicts sorted by lead_score desc.
+
+    Pass date_from/date_to (MM/DD/YYYY) for an exact range, or use days_back
+    to go N days back from today. GSCCCA enforces a max 30-day range per search.
     """
-    if days_back > MAX_DATE_RANGE_DAYS:
-        logger.warning(
-            "days_back=%d exceeds GSCCCA max of %d — capping",
-            days_back, MAX_DATE_RANGE_DAYS,
-        )
-        days_back = MAX_DATE_RANGE_DAYS
+    if date_from and date_to:
+        pass  # use as-is
+    else:
+        if days_back > MAX_DATE_RANGE_DAYS:
+            logger.warning(
+                "days_back=%d exceeds GSCCCA max of %d — capping",
+                days_back, MAX_DATE_RANGE_DAYS,
+            )
+            days_back = MAX_DATE_RANGE_DAYS
+        date_to   = datetime.now().strftime("%m/%d/%Y")
+        date_from = (datetime.now() - timedelta(days=days_back)).strftime("%m/%d/%Y")
+
+    logger.info("Date range: %s → %s", date_from, date_to)
 
     cookies    = load_cookies(cookie_source)
     pw_cookies = _to_playwright_cookies(cookies)
     counties   = resolve_counties(counties_spec)
-    date_to    = datetime.now().strftime("%m/%d/%Y")
-    date_from  = (datetime.now() - timedelta(days=days_back)).strftime("%m/%d/%Y")
 
     if tier == 1 or tier == "1":
         instruments = TIER_1
@@ -437,10 +447,12 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="GSCCCA lead scraper")
-    parser.add_argument("--counties",  default="ALL")
-    parser.add_argument("--days-back", type=int, default=3)
-    parser.add_argument("--tier",      default="both", choices=["1", "2", "both"])
-    parser.add_argument("--output",    default=None)
+    parser.add_argument("--counties",   default="ALL")
+    parser.add_argument("--days-back",  type=int, default=7)
+    parser.add_argument("--date-from",  default=None, help="Start date MM/DD/YYYY")
+    parser.add_argument("--date-to",    default=None, help="End date MM/DD/YYYY")
+    parser.add_argument("--tier",       default="both", choices=["1", "2", "both"])
+    parser.add_argument("--output",     default=None)
     args = parser.parse_args()
 
     today = datetime.now().strftime("%Y-%m-%d")
@@ -449,6 +461,8 @@ if __name__ == "__main__":
     leads = run_scrape(
         counties_spec=args.counties,
         days_back=args.days_back,
+        date_from=args.date_from,
+        date_to=args.date_to,
         tier=args.tier,
     )
     write_csv(leads, out)

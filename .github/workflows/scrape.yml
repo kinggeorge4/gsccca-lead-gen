@@ -9,22 +9,30 @@ on:
   workflow_dispatch:
     inputs:
       counties:
-        description: 'Counties to scrape (ALL or comma-separated: FULTON,COBB)'
+        description: 'Counties (ALL or comma-separated: FULTON,COBB,GWINNETT)'
         required: false
         default: 'ALL'
-      days_back:
-        description: 'Days of filings to pull'
+      date_from:
+        description: 'Start date MM/DD/YYYY (leave blank to use days_back)'
         required: false
-        default: '3'
+        default: ''
+      date_to:
+        description: 'End date MM/DD/YYYY (leave blank for today)'
+        required: false
+        default: ''
+      days_back:
+        description: 'Days back from today (used only if date_from is blank)'
+        required: false
+        default: '7'
       tier:
         description: 'Which tier to scrape'
         required: false
-        default: 'both'
+        default: '1'
         type: choice
         options:
-          - both
           - '1'
           - '2'
+          - both
 
 jobs:
   scrape:
@@ -44,24 +52,34 @@ jobs:
       - name: Install Playwright browser
         run: python3 -m playwright install chromium
 
-      - name: Determine tier from schedule
+      - name: Determine run parameters
         id: tier_check
         run: |
-          # Monday schedule triggers both tier 1 (daily) + tier 2 runs.
-          # For manual dispatch, use the input. Otherwise detect day.
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "tier=${{ inputs.tier }}" >> $GITHUB_OUTPUT
             echo "counties=${{ inputs.counties }}" >> $GITHUB_OUTPUT
-            echo "days_back=${{ inputs.days_back }}" >> $GITHUB_OUTPUT
+            # Use explicit dates if provided, otherwise fall back to days_back
+            if [ -n "${{ inputs.date_from }}" ]; then
+              echo "date_from=${{ inputs.date_from }}" >> $GITHUB_OUTPUT
+              DATE_TO="${{ inputs.date_to }}"
+              echo "date_to=${DATE_TO:-$(date +%m/%d/%Y)}" >> $GITHUB_OUTPUT
+              echo "days_back=0" >> $GITHUB_OUTPUT
+            else
+              echo "date_from=" >> $GITHUB_OUTPUT
+              echo "date_to=" >> $GITHUB_OUTPUT
+              echo "days_back=${{ inputs.days_back }}" >> $GITHUB_OUTPUT
+            fi
           else
-            DAY=$(date +%u)  # 1=Monday
+            DAY=$(date +%u)
             if [ "$DAY" = "1" ]; then
               echo "tier=both" >> $GITHUB_OUTPUT
             else
               echo "tier=1" >> $GITHUB_OUTPUT
             fi
             echo "counties=ALL" >> $GITHUB_OUTPUT
-            echo "days_back=3" >> $GITHUB_OUTPUT
+            echo "date_from=" >> $GITHUB_OUTPUT
+            echo "date_to=" >> $GITHUB_OUTPUT
+            echo "days_back=7" >> $GITHUB_OUTPUT
           fi
 
       - name: Run scraper
@@ -70,11 +88,22 @@ jobs:
           GDRIVE_CREDS_JSON: ${{ secrets.GDRIVE_CREDS_JSON }}
         run: |
           TODAY=$(date +%Y-%m-%d)
-          python3 -m scraper.fetch \
-            --counties "${{ steps.tier_check.outputs.counties }}" \
-            --days-back "${{ steps.tier_check.outputs.days_back }}" \
-            --tier "${{ steps.tier_check.outputs.tier }}" \
-            --output "leads_${TODAY}.csv"
+          DATE_FROM="${{ steps.tier_check.outputs.date_from }}"
+          DATE_TO="${{ steps.tier_check.outputs.date_to }}"
+          if [ -n "$DATE_FROM" ]; then
+            python3 -m scraper.fetch \
+              --counties "${{ steps.tier_check.outputs.counties }}" \
+              --date-from "$DATE_FROM" \
+              --date-to "$DATE_TO" \
+              --tier "${{ steps.tier_check.outputs.tier }}" \
+              --output "leads_${TODAY}.csv"
+          else
+            python3 -m scraper.fetch \
+              --counties "${{ steps.tier_check.outputs.counties }}" \
+              --days-back "${{ steps.tier_check.outputs.days_back }}" \
+              --tier "${{ steps.tier_check.outputs.tier }}" \
+              --output "leads_${TODAY}.csv"
+          fi
 
       - name: Upload to Google Drive
         env:
