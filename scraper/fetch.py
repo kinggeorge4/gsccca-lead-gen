@@ -396,6 +396,7 @@ def run_scrape(
     cookie_source: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
+    output_path: Path | None = None,
 ) -> list[dict]:
     """
     Full scrape run. Returns list of scored lead dicts sorted by lead_score desc.
@@ -431,6 +432,24 @@ def run_scrape(
     leads: list[dict] = []
     total_combos = len(counties) * len(instruments)
     done = 0
+
+    # Incremental write: track how many leads have been flushed so far
+    _flushed = 0
+
+    def _flush_partial() -> None:
+        nonlocal _flushed
+        if output_path is None or len(leads) <= _flushed:
+            return
+        new_leads = leads[_flushed:]
+        mode = "w" if _flushed == 0 else "a"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with output_path.open(mode, newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=FIELDNAMES, extrasaction="ignore")
+            if mode == "w":
+                writer.writeheader()
+            writer.writerows(new_leads)
+        _flushed = len(leads)
+        logger.info("Partial save: %d leads → %s", _flushed, output_path)
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
@@ -479,6 +498,9 @@ def run_scrape(
                         )
 
                     time.sleep(random.uniform(2, 4))
+
+                # Flush after every county so progress survives a crash
+                _flush_partial()
 
             # OCR second pass: fill addresses for counties without GIS coverage.
             # Use a tall viewport (2400px) so the full PT-61 form renders in the canvas.
@@ -550,6 +572,7 @@ if __name__ == "__main__":
         date_from=args.date_from,
         date_to=args.date_to,
         tier=args.tier,
+        output_path=out,
     )
     write_csv(leads, out)
     print(f"\nDone. {len(leads)} leads → {out}")
