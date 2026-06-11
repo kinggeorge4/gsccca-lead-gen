@@ -27,6 +27,7 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 from .counties import COUNTY_IDS, GA_COUNTIES, resolve_counties
 from .instruments import ALL_INSTRUMENTS, TIER_1, TIER_2, get_tier
 from .score import score_lead
+from .enrich import lookup_address
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +112,11 @@ def _parse_dashboard_html(
       BodyContent_lvDashboard_lvExpandedGrantor_N_lblGrantorName_M
       BodyContent_lvDashboard_lvExpandedGrantee_N_lblGranteeName_M
       BodyContent_lvDashboard_lvCrossReference_N_lblXRefType_M  (PT-61 sale price)
+      BodyContent_lvDashboard_lvProperties_N_lblDistrict_M
+      BodyContent_lvDashboard_lvProperties_N_lblLandLot_M
+      BodyContent_lvDashboard_lvProperties_N_lblSubdivision_M
+      BodyContent_lvDashboard_lvProperties_N_lblLot_M
+      BodyContent_lvDashboard_lvProperties_N_lblBlock_M
 
     Returns (records_on_this_page, total_record_count).
     """
@@ -156,8 +162,20 @@ def _parse_dashboard_html(
         if not grantor and not grantee:
             continue
 
+        # Legal description from lvProperties (populated after Expand All Details)
+        prop_prefix = f"BodyContent_lvDashboard_lvProperties_{n}_lbl"
+        district    = _first_span_text(soup, f"{prop_prefix}District_0")
+        land_lot    = _first_span_text(soup, f"{prop_prefix}LandLot_0")
+        subdivision = _first_span_text(soup, f"{prop_prefix}Subdivision_0")
+        lot         = _first_span_text(soup, f"{prop_prefix}Lot_0")
+        block       = _first_span_text(soup, f"{prop_prefix}Block_0")
+
+        first_name, last_name = _split_name(grantor)
+
         records.append({
             "grantor_name":         grantor,
+            "grantor_first_name":   first_name,
+            "grantor_last_name":    last_name,
             "grantee_name":         grantee,
             "instrument_type":      instrument,
             "book_page":            book_page,
@@ -165,12 +183,53 @@ def _parse_dashboard_html(
             "county":               county,
             "parcel_id":            "",
             "consideration_amount": consideration,
+            "district":             district,
+            "land_lot":             land_lot,
+            "subdivision":          subdivision,
+            "lot":                  lot,
+            "block":                block,
+            "street_address":       "",
+            "city":                 "",
+            "state":                "GA",
+            "zip_code":             "",
             "tier":                 tier or 0,
             "scraped_at":           datetime.now(timezone.utc).isoformat(),
             "source_url":           source_url,
         })
 
     return records, total
+
+
+def _first_span_text(soup: BeautifulSoup, span_id: str) -> str:
+    s = soup.find("span", id=span_id)
+    return s.get_text(strip=True) if s else ""
+
+
+def _split_name(full_name: str) -> tuple[str, str]:
+    """
+    Split a grantor name into (first, last) for REsimpli import.
+    GSCCCA format is typically "LAST, FIRST MIDDLE" for individuals,
+    or just the entity name for LLCs/corporations.
+    Returns ("", full_name) for entities (no comma or all-caps LLC/CORP/TRUST).
+    """
+    if not full_name:
+        return "", ""
+    # Single name in the semicolon-joined list (take first grantor only)
+    name = full_name.split(";")[0].strip()
+    # Detect entities: contains LLC, CORP, INC, TRUST, BANK, etc.
+    entity_keywords = ("LLC", "INC", "CORP", "TRUST", "BANK", "ASSOC",
+                       "HOLDINGS", "PROPERTIES", "INVESTMENTS", "FUND",
+                       "MORTGAGE", "FINANCIAL", "GROUP", "REALTY")
+    if any(kw in name.upper() for kw in entity_keywords):
+        return "", name.title()
+    # GSCCCA indexes individuals as "LAST, FIRST" — only split on comma
+    if "," in name:
+        parts = name.split(",", 1)
+        last  = parts[0].strip().title()
+        first = parts[1].strip().title()
+        return first, last
+    # No comma: unclear format; treat as entity / unknown
+    return "", name.title()
 
 
 def _collect_names(soup: BeautifulSoup, id_prefix: str) -> list[str]:
@@ -395,6 +454,16 @@ def run_scrape(
                             date_from, date_to,
                         )
                         for lead in records:
+                            # Enrich with address from county GIS
+                            addr = lookup_address(
+                                county,
+                                lead.get("book_page", ""),
+                                subdivision=lead.get("subdivision", ""),
+                                lot=lead.get("lot", ""),
+                                district=lead.get("district", ""),
+                                grantor_name=lead.get("grantor_name", ""),
+                            )
+                            lead.update(addr)
                             lead["lead_score"] = score_lead(lead)
                             lead["notes"] = (
                                 f"{lead['instrument_type']} | Score: {lead['lead_score']} | "
@@ -419,8 +488,12 @@ def run_scrape(
 # ─── CSV export ───────────────────────────────────────────────────────────────
 
 FIELDNAMES = [
-    "grantor_name", "grantee_name", "instrument_type", "book_page",
-    "file_date", "county", "parcel_id", "consideration_amount",
+    "grantor_first_name", "grantor_last_name", "grantor_name",
+    "grantee_name", "instrument_type", "book_page",
+    "file_date", "county",
+    "street_address", "city", "state", "zip_code",
+    "subdivision", "district", "land_lot", "lot", "block",
+    "parcel_id", "consideration_amount",
     "tier", "lead_score", "scraped_at", "source_url", "notes",
 ]
 
