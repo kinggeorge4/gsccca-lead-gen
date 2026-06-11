@@ -480,9 +480,11 @@ def run_scrape(
 
                     time.sleep(random.uniform(2, 4))
 
-            # OCR second pass: fill addresses for counties without GIS coverage
+            # OCR second pass: fill addresses for counties without GIS coverage.
+            # Use a tall viewport (2400px) so the full PT-61 form renders in the canvas.
             try:
                 ocr_page = context.new_page()
+                ocr_page.set_viewport_size({"width": 1280, "height": 2400})
                 _county_ids_int = {k: int(v) for k, v in COUNTY_IDS.items()}
                 enrich_missing_addresses(ocr_page, leads, _county_ids_int)
                 ocr_page.close()

@@ -107,17 +107,29 @@ python -m scraper.fetch --output my_leads.csv
 
 ---
 
+## Address Enrichment
+
+Address extraction runs in two passes after scraping:
+
+1. **GIS lookup (fast)** — `scraper/enrich.py` queries county ArcGIS REST APIs for Gwinnett and Cherokee. Matches parcel records by subdivision/lot or deed book/page.
+
+2. **PT-61 OCR (fallback)** — `scraper/deed_ocr.py` runs for any record still missing an address. It navigates the GSCCCA book/page search, extracts the PT-61 (Georgia Real Estate Transfer Tax Return) EFLNO from `final.asp`, loads the HTML5 imaging viewer, pulls the rendered canvas as PNG, and runs pytesseract to extract the seller mailing address from Section A. Tested coverage: **~97%** across Cobb, DeKalb, and Gwinnett (remaining 3% are exempt deed types with no PT-61 filed — Trustee's Deed, Estate Deed).
+
+---
+
 ## File Structure
 
 ```
 gsccca-lead-gen/
 ├── scraper/
-│   ├── fetch.py           # Core scraper
-│   ├── score.py           # Scoring engine
-│   ├── counties.py        # All 159 GA counties
-│   ├── instruments.py     # Tier 1/2 definitions
+│   ├── fetch.py           # Core scraper + orchestration
+│   ├── enrich.py          # Pass 1: GIS address lookup (Gwinnett, Cherokee)
+│   ├── deed_ocr.py        # Pass 2: PT-61 OCR address extraction (all counties)
+│   ├── score.py           # Lead scoring engine (0–100)
+│   ├── counties.py        # All 159 GA counties with GSCCCA IDs
+│   ├── instruments.py     # Tier 1/2 instrument definitions
 │   └── requirements.txt
-├── get_gsccca_cookie.py   # LOCAL ONLY — cookie capture
+├── get_gsccca_cookie.py   # LOCAL ONLY — never commit output
 ├── upload_drive.py        # Google Drive upload
 ├── dashboard/
 │   └── index.html         # GitHub Pages UI
@@ -136,5 +148,9 @@ gsccca-lead-gen/
 **All counties return 0 results** — Check cookie age. If `_check_session_expired` logs "login in title", re-run `get_gsccca_cookie.py` and update the secret.
 
 **Rate limited** — Increase `sleep(2-4)` delay in `fetch.py` or reduce concurrent counties.
+
+**OCR returns no address** — Usually means the deed type has no PT-61 (Trustee's Deed, Estate Deed). Expected miss rate ~3%.
+
+**OCR canvas is blank** — Viewport too short (must be ≥2400px) or `networkidle` didn't wait long enough for `GetImage.aspx`. Already configured in `fetch.py`.
 
 **Drive upload fails** — Verify `GDRIVE_CREDS_JSON` secret contains valid service account JSON with Drive API access and the folder shared with the service account email.

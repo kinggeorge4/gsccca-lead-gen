@@ -49,8 +49,9 @@ _ADDR_TRIGGERS = [
     r"commonly\s+known\s+as\s+([^\n,]{5,80})",
     r"located\s+at\s+([0-9][^\n,]{4,80})",
     r"situate[d]?\s+at\s+([0-9][^\n,]{4,80})",
-    # Generic: street-number followed by street name ending with a known type
-    r"(\d{1,5}\s+[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+){0,3}\s+(?:"
+    # Generic: street-number followed by street name ending with a known type.
+    # [a-zA-Z]* (not +) allows single-letter directional prefixes (N, S, E, W).
+    r"(\d{1,5}\s+[A-Z][a-zA-Z]*(?:\s+[A-Z][a-zA-Z]*){0,3}\s+(?:"
     + "|".join(_STREET_TYPES)
     + r")[\s.,]{1,3})",
 ]
@@ -188,17 +189,17 @@ def _parse_pt61_address(text: str, county_name: str = "") -> dict | None:
 def _ocr_from_viewer(page, url: str) -> str | None:
     """
     Load url in page, extract canvas, run OCR. Returns raw text or None.
-    Handles rate-limit detection.
+    Uses networkidle to ensure the encrypted TIFF is fully decoded and painted
+    before reading the canvas.
     """
     import pytesseract
 
-    page.goto(url, wait_until="domcontentloaded", timeout=25000)
+    # networkidle waits for GetImage.aspx to complete before we read the canvas
+    page.goto(url, wait_until="networkidle", timeout=30000)
 
     if "login" in page.url.lower():
         logger.debug("Session expired loading viewer: %s", url)
         return None
-
-    _wait_for_viewer(page)
 
     img = _get_canvas_image(page)
     if img is None:
@@ -370,13 +371,9 @@ def enrich_missing_addresses(page, leads: list[dict], county_ids: dict[str, int]
         leads:      Lead dicts — mutated in-place
         county_ids: County name → GSCCCA integer county ID
     """
-    _GIS_COVERED = {"GWINNETT", "CHEROKEE"}
-
     candidates = [
         r for r in leads
-        if not r.get("street_address")
-        and r.get("county", "").upper() not in _GIS_COVERED
-        and r.get("book_page")
+        if not r.get("street_address") and r.get("book_page")
     ]
 
     if not candidates:
@@ -431,7 +428,8 @@ def test_ocr_single(
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/124.0.0.0 Safari/537.36"
             ),
-            viewport={"width": 1280, "height": 900},
+            # 2400px tall so the full PT-61 form renders in the canvas
+            viewport={"width": 1280, "height": 2400},
         )
         ctx.add_cookies(pw_cookies)
         pg = ctx.new_page()
