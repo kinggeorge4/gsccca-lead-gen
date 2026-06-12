@@ -52,6 +52,12 @@ jobs:
       - name: Install Playwright browser
         run: python3 -m playwright install chromium --with-deps
 
+      - name: Refresh GSCCCA cookies
+        env:
+          GSCCCA_USERNAME: ${{ secrets.GSCCCA_USERNAME }}
+          GSCCCA_PASSWORD: ${{ secrets.GSCCCA_PASSWORD }}
+        run: python3 refresh_cookies.py
+
       - name: Determine run parameters
         id: tier_check
         run: |
