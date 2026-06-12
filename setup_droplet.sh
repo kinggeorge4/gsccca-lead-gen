@@ -38,6 +38,8 @@ curl -fsSL -o runner.tar.gz \
     "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz"
 tar xzf runner.tar.gz && rm runner.tar.gz
 
+export RUNNER_ALLOW_RUNASROOT=1
+
 ./config.sh \
     --url "$REPO_URL" \
     --token "$RUNNER_TOKEN" \
@@ -47,8 +49,8 @@ tar xzf runner.tar.gz && rm runner.tar.gz
     --replace
 
 echo "=== 6. Install runner as system service ==="
-./svc.sh install root
-./svc.sh start
+RUNNER_ALLOW_RUNASROOT=1 ./svc.sh install root
+RUNNER_ALLOW_RUNASROOT=1 ./svc.sh start
 
 echo ""
 echo "✓ Setup complete. Runner status:"
