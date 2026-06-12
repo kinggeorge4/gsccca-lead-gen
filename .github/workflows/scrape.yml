@@ -91,14 +91,14 @@ jobs:
           DATE_FROM="${{ steps.tier_check.outputs.date_from }}"
           DATE_TO="${{ steps.tier_check.outputs.date_to }}"
           if [ -n "$DATE_FROM" ]; then
-            caffeinate -is python3 -m scraper.fetch \
+            python3 -m scraper.fetch \
               --counties "${{ steps.tier_check.outputs.counties }}" \
               --date-from "$DATE_FROM" \
               --date-to "$DATE_TO" \
               --tier "${{ steps.tier_check.outputs.tier }}" \
               --output "leads_${TODAY}.csv"
           else
-            caffeinate -is python3 -m scraper.fetch \
+            python3 -m scraper.fetch \
               --counties "${{ steps.tier_check.outputs.counties }}" \
               --days-back "${{ steps.tier_check.outputs.days_back }}" \
               --tier "${{ steps.tier_check.outputs.tier }}" \
