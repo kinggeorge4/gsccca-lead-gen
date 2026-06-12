@@ -116,6 +116,18 @@ jobs:
           TODAY=$(date +%Y-%m-%d)
           python3 upload_drive.py "leads_${TODAY}.csv"
 
+      - name: Upload to Google Sheets
+        env:
+          GDRIVE_CREDS_JSON: ${{ secrets.GDRIVE_CREDS_JSON }}
+          GSHEET_ID: ${{ secrets.GSHEET_ID }}
+        run: |
+          if [ -z "$GDRIVE_CREDS_JSON" ] || [ -z "$GSHEET_ID" ]; then
+            echo "GDRIVE_CREDS_JSON or GSHEET_ID not set — skipping Sheets upload"
+            exit 0
+          fi
+          TODAY=$(date +%Y-%m-%d)
+          python3 upload_sheets.py "leads_${TODAY}.csv"
+
       - name: Generate dashboard data (leads.json)
         run: |
           TODAY=$(date +%Y-%m-%d)
