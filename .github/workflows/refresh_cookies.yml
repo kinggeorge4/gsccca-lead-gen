@@ -1,0 +1,30 @@
+name: Refresh GSCCCA Cookies
+
+on:
+  schedule:
+    # Every 10 hours — GSCCCA sessions expire after ~12h
+    - cron: '0 */10 * * *'
+  workflow_dispatch:
+
+jobs:
+  refresh:
+    runs-on: self-hosted
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Refresh cookies
+        env:
+          GSCCCA_USERNAME: ${{ secrets.GSCCCA_USERNAME }}
+          GSCCCA_PASSWORD: ${{ secrets.GSCCCA_PASSWORD }}
+        run: python3 refresh_cookies.py
+
+      - name: Verify cookie file
+        run: |
+          if [ -f /opt/gsccca/cookies.json ]; then
+            COUNT=$(python3 -c "import json; print(len(json.load(open('/opt/gsccca/cookies.json'))))")
+            echo "✓ $COUNT cookies saved to /opt/gsccca/cookies.json"
+          else
+            echo "ERROR: /opt/gsccca/cookies.json not found"
+            exit 1
+          fi

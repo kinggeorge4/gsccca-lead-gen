@@ -57,14 +57,21 @@ def load_cookies(source: str | None = None) -> list[dict]:
     raw = source or os.environ.get("GSCCCA_COOKIES") or ""
 
     if not raw:
-        cookie_file = Path(__file__).parents[1] / "cookies.json"
-        if cookie_file.exists():
-            raw = cookie_file.read_text()
-        else:
-            raise FileNotFoundError(
-                "No cookies found. Run get_gsccca_cookie.py first, "
-                "or set GSCCCA_COOKIES env var."
-            )
+        # Persistent cookie file on the DO droplet (refreshed every 10h)
+        for candidate in (
+            Path("/opt/gsccca/cookies.json"),
+            Path(__file__).parents[1] / "cookies.json",
+        ):
+            if candidate.exists():
+                raw = candidate.read_text()
+                logger.info("Loaded cookies from %s", candidate)
+                break
+
+    if not raw:
+        raise FileNotFoundError(
+            "No cookies found. Run refresh_cookies.py (droplet) or "
+            "get_gsccca_cookie.py (local), or set GSCCCA_COOKIES env var."
+        )
 
     if raw.strip().startswith(("[", "{")):
         cookies = json.loads(raw)
