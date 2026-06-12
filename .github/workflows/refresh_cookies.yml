@@ -13,6 +13,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Install dependencies
+        run: python3 -m pip install --break-system-packages -q playwright
+
+      - name: Install Playwright browser
+        run: python3 -m playwright install chromium --with-deps
+
       - name: Refresh cookies
         env:
           GSCCCA_USERNAME: ${{ secrets.GSCCCA_USERNAME }}

@@ -46,11 +46,11 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python3 -m pip install --user -r scraper/requirements.txt
-          python3 -m pip install --user google-api-python-client
+          python3 -m pip install --break-system-packages -q -r scraper/requirements.txt
+          python3 -m pip install --break-system-packages -q google-api-python-client
 
       - name: Install Playwright browser
-        run: python3 -m playwright install chromium
+        run: python3 -m playwright install chromium --with-deps
 
       - name: Determine run parameters
         id: tier_check
