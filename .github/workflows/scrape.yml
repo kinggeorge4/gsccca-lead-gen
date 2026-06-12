@@ -84,7 +84,6 @@ jobs:
 
       - name: Run scraper
         env:
-          GSCCCA_COOKIES: ${{ secrets.GSCCCA_COOKIES }}
           GDRIVE_CREDS_JSON: ${{ secrets.GDRIVE_CREDS_JSON }}
         run: |
           TODAY=$(date +%Y-%m-%d)
