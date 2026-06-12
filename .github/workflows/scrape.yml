@@ -105,6 +105,7 @@ jobs:
           fi
 
       - name: Upload to Google Drive
+        continue-on-error: true
         env:
           GDRIVE_CREDS_JSON: ${{ secrets.GDRIVE_CREDS_JSON }}
         run: |
