@@ -56,6 +56,29 @@ _ADDR_TRIGGERS = [
     + r")[\s.,]{1,3})",
 ]
 
+# PT-61 Section D / "Location of Property" — marks the property address block.
+# These labels appear AFTER Section A (seller mailing address) in form order,
+# so matching here avoids returning a bank's out-of-state mailing address.
+_SECTION_D_MARKERS = (
+    r"location\s+of\s+property",
+    r"street\s+address\s+of\s+(?:the\s+)?property",
+    r"section\s+d\b",
+    r"property\s+address\s*:",
+)
+
+# After a Section D marker, stop reading at these (indicates next form section)
+_SECTION_D_END_MARKERS = (
+    r"section\s+[e-z]\b",
+    r"calculation\s+of",
+    r"date\s+of\s+(?:deed|sale|transfer)",
+    r"transfer\s+tax",
+    r"state\s+tax\s+due",
+)
+
+# Matches a two-letter state abbreviation (not GA) followed by a zip code.
+# Used to detect out-of-state addresses (bank/lender Section A entries).
+_NON_GA_STATE_RE = re.compile(r"\b(?!GA\b)[A-Z]{2}\s+\d{5}\b")
+
 
 # ─── Low-level helpers ────────────────────────────────────────────────────────
 
@@ -128,14 +151,69 @@ def _is_rate_limited_text(text: str) -> bool:
 
 # ─── Address parsing ──────────────────────────────────────────────────────────
 
+def _find_section_d(clean: str) -> str | None:
+    """
+    Return the substring covering Section D / 'Location of Property' block.
+
+    Clips at the next section boundary or 500 chars, whichever comes first.
+    Section D appears after Section A (seller mailing address) in PT-61 forms,
+    so searching here avoids matching the bank/lender address for foreclosures.
+    """
+    for marker in _SECTION_D_MARKERS:
+        m = re.search(marker, clean, re.I)
+        if not m:
+            continue
+        start = m.end()
+        end = min(start + 500, len(clean))
+        for end_pat in _SECTION_D_END_MARKERS:
+            em = re.search(end_pat, clean[start:], re.I)
+            if em:
+                end = min(end, start + em.start())
+        snippet = clean[start:end].strip()
+        if snippet:
+            return snippet
+    return None
+
+
 def _extract_street_address(clean: str) -> str | None:
-    """Return the first plausible street address found in clean OCR text."""
-    for pat in _ADDR_TRIGGERS:
+    """
+    Return the property street address from PT-61 OCR text.
+
+    Priority order:
+    1. Section D / "Location of Property" block — avoids the seller's mailing
+       address (Section A) which is a bank address for institutional grantors.
+    2. Labeled contextual patterns on full text, skipped when a non-GA state
+       code appears in the immediate vicinity (bank address signal).
+    3. Generic street-number pattern — accepted only when a GA zip is nearby.
+    """
+    # ── 1. Section D block (property address, comes after bank address) ─────
+    section_d = _find_section_d(clean)
+    if section_d:
+        for pat in _ADDR_TRIGGERS:
+            m = re.search(pat, section_d, re.I)
+            if m:
+                candidate = m.group(1).strip().rstrip(".,;")
+                if re.search(r"\d", candidate) and 8 <= len(candidate) <= 120:
+                    return candidate
+
+    # ── 2. Labeled patterns on full text — reject if non-GA state nearby ───
+    for pat in _ADDR_TRIGGERS[:-1]:  # exclude generic fallback
         m = re.search(pat, clean, re.I)
         if m:
             candidate = m.group(1).strip().rstrip(".,;")
             if re.search(r"\d", candidate) and 8 <= len(candidate) <= 120:
+                vicinity = clean[m.start() : m.end() + 120]
+                if not _NON_GA_STATE_RE.search(vicinity):
+                    return candidate
+
+    # ── 3. Generic fallback — accept only when GA zip is nearby ─────────────
+    for m in re.finditer(_ADDR_TRIGGERS[-1], clean, re.I):
+        candidate = m.group(1).strip().rstrip(".,;")
+        if re.search(r"\d", candidate) and 8 <= len(candidate) <= 120:
+            vicinity = clean[max(0, m.start() - 30) : m.end() + 150]
+            if re.search(r"\bGA\s+\d{5}\b", vicinity, re.I):
                 return candidate
+
     return None
 
 
