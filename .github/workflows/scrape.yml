@@ -37,6 +37,7 @@ on:
 jobs:
   scrape:
     runs-on: self-hosted
+    timeout-minutes: 720
     permissions:
       contents: write
 
@@ -123,6 +124,7 @@ jobs:
           python3 upload_drive.py "leads_${TODAY}.csv"
 
       - name: Upload to Google Sheets
+        if: always()
         env:
           GDRIVE_CREDS_JSON: ${{ secrets.GDRIVE_CREDS_JSON }}
           GSHEET_ID: ${{ secrets.GSHEET_ID }}
@@ -132,9 +134,14 @@ jobs:
             exit 0
           fi
           TODAY=$(date +%Y-%m-%d)
+          if [ ! -f "leads_${TODAY}.csv" ]; then
+            echo "No CSV found for ${TODAY} — skipping Sheets upload"
+            exit 0
+          fi
           python3 upload_sheets.py "leads_${TODAY}.csv"
 
       - name: Generate dashboard data (leads.json)
+        if: always()
         run: |
           TODAY=$(date +%Y-%m-%d)
           python3 - <<'EOF'
@@ -157,13 +164,16 @@ jobs:
           EOF
 
       - name: Archive CSV as artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: leads-${{ github.run_id }}
           path: leads_*.csv
           retention-days: 30
+          if-no-files-found: warn
 
       - name: Deploy dashboard to gh-pages
+        if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
