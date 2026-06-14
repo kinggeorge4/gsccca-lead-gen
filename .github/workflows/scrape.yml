@@ -153,10 +153,18 @@ jobs:
               with open(f, newline="", encoding="utf-8") as fh:
                   all_leads.extend(list(csv.DictReader(fh)))
 
-          # Convert numeric fields
+          # Convert numeric fields; clear bad OCR addresses
           for r in all_leads:
               r["lead_score"] = int(r.get("lead_score") or 0)
               r["tier"] = int(r.get("tier") or 0)
+              city = (r.get("city") or "").lower()
+              zipcode = (r.get("zip_code") or "").strip()
+              bad_city = "county" in city
+              bad_zip  = bool(zipcode) and (len(zipcode) > 5 or not zipcode.isdigit())
+              if bad_city or bad_zip:
+                  r["street_address"] = ""
+                  r["city"] = ""
+                  r["zip_code"] = ""
 
           out = pathlib.Path("dashboard/leads.json")
           out.write_text(json.dumps(all_leads, indent=2))

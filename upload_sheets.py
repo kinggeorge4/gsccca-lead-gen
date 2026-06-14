@@ -93,13 +93,38 @@ def _existing_keys(ws) -> set[str]:
     return {f"{r[ci]}|{r[bi]}" for r in rows[1:] if len(r) > max(ci, bi)}
 
 
+def _is_bad_address(r: dict) -> bool:
+    """True if address fields contain known OCR artifacts that should be cleared."""
+    city = (r.get("city") or "").lower()
+    street = (r.get("street_address") or "").strip()
+    # City contains "county" → OCR read the county header, not a real city name
+    if "county" in city:
+        return True
+    # Zip code longer than 5 digits or starts with non-GA ranges (e.g. 18303, 44801)
+    zipcode = (r.get("zip_code") or "").strip()
+    if zipcode and (len(zipcode) > 5 or not zipcode.isdigit()):
+        return True
+    return False
+
+
+def _clean_lead(r: dict) -> dict:
+    """Clear address fields if they contain OCR artifacts."""
+    if _is_bad_address(r):
+        r = dict(r)
+        r["street_address"] = ""
+        r["city"] = ""
+        r["zip_code"] = ""
+    return r
+
+
 def _rows_to_append(leads: list[dict], existing_keys: set[str]) -> list[list]:
-    """Filter out duplicates and convert to row lists."""
+    """Filter out duplicates, clean bad addresses, and convert to row lists."""
     out = []
     for r in leads:
         key = f"{r.get('county','')}|{r.get('book_page','')}"
         if key in existing_keys:
             continue
+        r = _clean_lead(r)
         out.append([str(r.get(col, "") or "") for col in SHEET_COLUMNS])
     return out
 

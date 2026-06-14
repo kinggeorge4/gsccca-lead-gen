@@ -222,15 +222,22 @@ def _extract_city_zip(clean: str) -> tuple[str, str]:
     Return (city, zip_code) from cleaned OCR text.
 
     Prefers title-case city names (individual sellers) over ALL-CAPS (corporate).
+    Skips matches where the city token contains "County" — those are OCR
+    artifacts from the county header printed on deed forms, not real city names.
     """
+    def _ok_city(name: str) -> bool:
+        return "county" not in name.lower()
+
     # Title-case first (e.g. "Acworth, GA 30101")
-    m = re.search(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\s*,\s*GA\s+(\d{5})", clean)
-    if m:
-        return m.group(1).strip(), m.group(2)
+    for m in re.finditer(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\s*,\s*GA\s+(\d{5})", clean):
+        city = m.group(1).strip()
+        if _ok_city(city):
+            return city, m.group(2)
     # All-caps fallback (e.g. "MARIETTA, GA 30066" from corporate buyer section)
-    m = re.search(r"\b([A-Z]{2,}(?:\s+[A-Z]+){0,2})\s*,\s*GA\s+(\d{5})", clean)
-    if m:
-        return m.group(1).strip().title(), m.group(2)
+    for m in re.finditer(r"\b([A-Z]{2,}(?:\s+[A-Z]+){0,2})\s*,\s*GA\s+(\d{5})", clean):
+        city = m.group(1).strip().title()
+        if _ok_city(city):
+            return city, m.group(2)
     return "", ""
 
 
@@ -459,6 +466,12 @@ def enrich_missing_addresses(page, leads: list[dict], county_ids: dict[str, int]
 
     logger.info("OCR second pass: %d records without address", len(candidates))
 
+    # Track addresses seen across counties during this pass.
+    # An address returned for 3+ different counties is a servicer/attorney
+    # address printed on every deed — not the actual property address.
+    _addr_county_seen: dict[str, set[str]] = {}
+    _SERVICER_THRESHOLD = 3
+
     for lead in candidates:
         county = lead.get("county", "").upper()
         county_id = county_ids.get(county)
@@ -473,9 +486,22 @@ def enrich_missing_addresses(page, leads: list[dict], county_ids: dict[str, int]
         book, page_num = m.group(1), m.group(2)
 
         addr = lookup_address_via_ocr(page, county_id, book, page_num)
-        if addr:
-            lead.update({k: v for k, v in addr.items() if v})
-            logger.info("OCR enriched %s %s → %s", county, bp, addr.get("street_address"))
+        if not addr:
+            continue
+
+        street = addr.get("street_address", "")
+        if street:
+            key = street.lower().strip()
+            _addr_county_seen.setdefault(key, set()).add(county)
+            if len(_addr_county_seen[key]) >= _SERVICER_THRESHOLD:
+                logger.debug(
+                    "Skipping servicer/attorney address '%s' (seen in %d counties)",
+                    street, len(_addr_county_seen[key]),
+                )
+                continue
+
+        lead.update({k: v for k, v in addr.items() if v})
+        logger.info("OCR enriched %s %s → %s", county, bp, street)
 
 
 # ─── Standalone test ──────────────────────────────────────────────────────────
